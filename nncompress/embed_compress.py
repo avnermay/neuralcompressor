@@ -4,6 +4,7 @@ import sys
 import os
 import time
 import math
+import logging # Avner change
 import tensorflow as tf
 import numpy as np
 # Import _linear
@@ -13,17 +14,12 @@ if tuple(map(int, tf.__version__.split("."))) >= (1, 6, 0):
 else:
     from tensorflow.python.ops.rnn_cell_impl import _linear
 
-
-
 tf.flags.DEFINE_string('qmats', "data/glove.6B.300d.quant.npy", "output")
-
 
 class EmbeddingCompressor(object):
 
-    _TAU = 1.0
-    _BATCH_SIZE = 64
-
-    def __init__(self, n_codebooks, n_centroids, model_path):
+    def __init__(self, n_codebooks, n_centroids, model_path,
+            learning_rate=0.0001, batch_size=64, grad_clip=0.001, tau=1.0): # Avner change
         """
         M: number of codebooks (subcodes)
         K: number of vectors in each codebook
@@ -32,6 +28,12 @@ class EmbeddingCompressor(object):
         self.M = n_codebooks
         self.K = n_centroids
         self._model_path = model_path
+        # Avner begin change
+        self._LEARNING_RATE = learning_rate
+        self._BATCH_SIZE = batch_size
+        self._GRAD_CLIP = grad_clip
+        self._TAU = tau
+        # Avner end change
 
     def _gumbel_dist(self, shape, eps=1e-20):
         U = tf.random_uniform(shape,minval=0,maxval=1)
@@ -135,12 +137,12 @@ class EmbeddingCompressor(object):
         loss = tf.reduce_mean(loss, name="loss")
 
         # Define optimization
-        max_grad_norm = 0.001
+        max_grad_norm = self._GRAD_CLIP # Avner change
         tvars = tf.trainable_variables()
         grads = tf.gradients(loss, tvars)
         grads, global_norm = tf.clip_by_global_norm(grads, max_grad_norm)
         global_norm = tf.identity(global_norm, name="global_norm")
-        optimizer = tf.train.AdamOptimizer(0.0001)
+        optimizer = tf.train.AdamOptimizer(self._LEARNING_RATE)
         train_op = optimizer.apply_gradients(zip(grads, tvars), name="train_op")
 
         return word_ids, loss, train_op, maxp
@@ -151,6 +153,7 @@ class EmbeddingCompressor(object):
         Args:
             embed_matrix: a numpy matrix
         """
+        dca_train_log = [] # Avner change
         vocab_size = embed_matrix.shape[0]
         valid_ids = np.random.RandomState(3).randint(0, vocab_size, size=(self._BATCH_SIZE * 10,)).tolist()
         # Training
@@ -179,7 +182,7 @@ class EmbeddingCompressor(object):
 
                 # Print every epoch
                 time_elapsed = time.time() - start_time
-                bps = len(train_loss_list) / time_elapsed
+                batches_per_second = len(train_loss_list) / time_elapsed # Avner change
 
                 # Validation
                 valid_loss_list = []
@@ -193,21 +196,35 @@ class EmbeddingCompressor(object):
                     valid_loss_list.append(loss)
                     valid_maxp_list.append(maxp)
 
-                # Report
+                # Avner begin change
+                train_loss = np.mean(train_loss_list)
+                train_maxp = np.mean(train_maxp_list)
                 valid_loss = np.mean(valid_loss_list)
+                valid_maxp = np.mean(valid_maxp_list)
+                # Avner end change
                 report_token = ""
                 if valid_loss <= best_loss * 0.999:
                     report_token = "*"
                     best_loss = valid_loss
                     saver.save(sess, self._model_path)
-                print("[epoch{}] trian_loss={:.2f} train_maxp={:.2f} valid_loss={:.2f} valid_maxp={:.2f} bps={:.0f} {}".format(
-                    epoch,
-                    np.mean(train_loss_list), np.mean(train_maxp_list),
-                    np.mean(valid_loss_list), np.mean(valid_maxp_list),
-                    len(train_loss_list) / time_elapsed,
-                    report_token
-                ))
-        print("Training Done")
+                # Avner begin change
+                log_str = "[epoch{}] trian_loss={:.2f} train_maxp={:.2f} valid_loss={:.2f} valid_maxp={:.2f} batches_per_second={:.0f} time_elapsed={:.2f} {}".format(
+                    epoch, train_loss, train_maxp, valid_loss, valid_maxp,
+                    batches_per_second, time_elapsed, report_token)
+                logging.info(log_str)
+                dca_train_log.append(
+                    {"epoch": epoch,
+                     "train_loss" : train_loss,
+                     "train_maxp" : train_maxp,
+                     "valid_loss" : valid_loss,
+                     "valid_maxp" : valid_maxp,
+                     "batches_per_second" : batches_per_second,
+                     "time_elapsed" : time_elapsed,
+                     "report_token" : report_token}
+                )
+                # Avner end change
+        logging.info("Training Done") # Avner change
+        return dca_train_log # Avner change
 
     def export(self, embed_matrix, prefix):
         """Export word codes and codebook for given embedding.
@@ -225,17 +242,20 @@ class EmbeddingCompressor(object):
             saver.restore(sess, self._model_path)
 
             # Dump codebook
-            codebook_tensor = sess.graph.get_tensor_by_name('Graph/codebook:0')
-            np.save(prefix + ".codebook", sess.run(codebook_tensor))
+            codebook_tensor = sess.run(sess.graph.get_tensor_by_name('Graph/codebook:0')) # Avner change
+            np.save(prefix + ".codebook", codebook_tensor)
 
             # Dump codes
+            codes_to_return = [] # Avner change
             with open(prefix + ".codes", "w") as fout:
                 vocab_list = list(range(embed_matrix.shape[0]))
                 for start_idx in range(0, vocab_size, self._BATCH_SIZE):
                     word_ids = vocab_list[start_idx:start_idx + self._BATCH_SIZE]
                     codes = sess.run(codes_op, {word_ids_var: word_ids}).tolist()
                     for code in codes:
+                        codes_to_return.append(code) # Avner change
                         fout.write(" ".join(map(str, code)) + "\n")
+        return codes_to_return, codebook_tensor  # Avner change
 
     def evaluate(self, embed_matrix):
         assert os.path.exists(self._model_path + ".meta")
@@ -246,7 +266,6 @@ class EmbeddingCompressor(object):
             saver = tf.train.Saver()
             saver.restore(sess, self._model_path)
 
-
             vocab_list = list(range(embed_matrix.shape[0]))
             distances = []
             for start_idx in range(0, vocab_size, self._BATCH_SIZE):
@@ -254,4 +273,5 @@ class EmbeddingCompressor(object):
                 reconstructed_vecs = sess.run(reconstruct_op, {word_ids_var: word_ids})
                 original_vecs = embed_matrix[start_idx:start_idx + self._BATCH_SIZE]
                 distances.extend(np.linalg.norm(reconstructed_vecs - original_vecs, axis=1).tolist())
-            return np.mean(distances)
+            frob_squared_error = np.sum([d**2 for d in distances]) # Avner change
+        return np.mean(distances), frob_squared_error # Avner change
