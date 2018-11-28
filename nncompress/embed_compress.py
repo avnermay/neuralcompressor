@@ -214,10 +214,10 @@ class EmbeddingCompressor(object):
                 logging.info(log_str)
                 dca_train_log.append(
                     {"epoch": epoch,
-                     "train_loss" : train_loss,
-                     "train_maxp" : train_maxp,
-                     "valid_loss" : valid_loss,
-                     "valid_maxp" : valid_maxp,
+                     "train_loss" : float(train_loss),
+                     "train_maxp" : float(train_maxp),
+                     "valid_loss" : float(valid_loss),
+                     "valid_maxp" : float(valid_maxp),
                      "batches_per_second" : batches_per_second,
                      "time_elapsed" : time_elapsed,
                      "report_token" : report_token}
